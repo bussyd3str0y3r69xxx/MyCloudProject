@@ -50,6 +50,47 @@
       background: #0069d9;
     }
 
+    /* ── NEW: search bar ── */
+    .search-row {
+      display: flex;
+      gap: 8px;
+      margin-top: 16px;
+    }
+
+    .search-row input {
+      margin: 0;
+      flex: 1;
+    }
+
+    button#searchBtn {
+      background: #6c757d;
+      color: white;
+      border: none;
+      padding: 12px 16px;
+      border-radius: 6px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: 0.3s;
+    }
+
+    button#searchBtn:hover { background: #5a6268; }
+
+    button#clearBtn {
+      background: #f8f9fa;
+      color: #333;
+      border: 1px solid #ddd;
+      padding: 12px 16px;
+      border-radius: 6px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: 0.3s;
+    }
+
+    button#clearBtn:hover { background: #e2e6ea; }
+    /* ─────────────────── */
+
     .post {
       background: #fff;
       border: 1px solid #eaeaea;
@@ -69,14 +110,35 @@
       transition: 0.2s;
     }
 
-    .like-btn:hover {
-      background: #e2e6ea;
+    .like-btn:hover { background: #e2e6ea; }
+
+    /* ── NEW: delete button ── */
+    .delete-btn {
+      background: #fff0f0;
+      border: 1px solid #f5c6cb;
+      color: #c0392b;
+      padding: 5px 12px;
+      border-radius: 20px;
+      font-size: 14px;
+      cursor: pointer;
+      transition: 0.2s;
+      margin-left: 8px;
     }
+
+    .delete-btn:hover { background: #f8d7da; }
+    /* ─────────────────────── */
 
     .time {
       font-size: 11px;
       color: #999;
       float: right;
+    }
+
+    #searchStatus {
+      font-size: 13px;
+      color: #888;
+      margin-top: 10px;
+      min-height: 18px;
     }
   </style>
 </head>
@@ -85,10 +147,19 @@
 <div class="container">
   <h3>Панель управления данными</h3>
 
-  <input type="text"   id="name"  placeholder="Имя профиля">
-  <input type="email"  id="email" placeholder="Рабочий Email">
+  <input type="text"  id="name"  placeholder="Имя профиля">
+  <input type="email" id="email" placeholder="Рабочий Email">
 
   <button id="mainBtn">Опубликовать в облако</button>
+
+  <!-- ── NEW: search bar ── -->
+  <div class="search-row">
+    <input type="text" id="searchInput" placeholder="Поиск по имени…">
+    <button id="searchBtn">🔍 Найти</button>
+    <button id="clearBtn">✕</button>
+  </div>
+  <div id="searchStatus"></div>
+  <!-- ─────────────────── -->
 
   <div id="feed" style="width:100%; max-width:500px;"></div>
 </div>
@@ -101,11 +172,14 @@ import {
   addDoc,
   query,
   orderBy,
+  where,
   onSnapshot,
   doc,
   updateDoc,
+  deleteDoc,
   serverTimestamp,
-  increment
+  increment,
+  getDocs
 } from "https://www.gstatic.com/firebasejs/10.7.0/firebase-firestore.js";
 
 const firebaseConfig = {
@@ -121,67 +195,142 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const db  = getFirestore(app);
 
-window.processLike = async (id) => {
-  const docRef = doc(db, "requests", id);
+// ── keep track of the live listener so we can swap it ──
+let unsubscribe = null;
+
+// ════════════════════════════════════════════════════════
+// FUNCTION 1 — deletePost
+// Deletes a document from the "requests" collection by id.
+// ════════════════════════════════════════════════════════
+window.deletePost = async (id) => {
+  if (!confirm("Удалить эту запись?")) return;
   try {
-    await updateDoc(docRef, {
-      likes: increment(1)
-    });
+    await deleteDoc(doc(db, "requests", id));
+  } catch (e) {
+    alert("Не удалось удалить запись.");
+    console.error("Ошибка при удалении:", e);
+  }
+};
+
+// ════════════════════════════════════════════════════════
+// FUNCTION 2 — searchByName
+// Queries Firestore for documents whose "name" field
+// matches the search string, then renders the results.
+// ════════════════════════════════════════════════════════
+async function searchByName(searchTerm) {
+  const status = document.getElementById("searchStatus");
+  const feed   = document.getElementById("feed");
+
+  if (!searchTerm.trim()) {
+    status.textContent = "";
+    startLiveFeed();          // restore the real-time feed
+    return;
+  }
+
+  // Stop the live listener while showing search results
+  if (unsubscribe) { unsubscribe(); unsubscribe = null; }
+
+  status.textContent = "Поиск…";
+  feed.innerHTML = "";
+
+  try {
+    const q = query(
+      collection(db, "requests"),
+      where("name", ">=", searchTerm),
+      where("name", "<=", searchTerm + "\uf8ff"),
+      orderBy("name")
+    );
+
+    const snapshot = await getDocs(q);
+
+    if (snapshot.empty) {
+      status.textContent = `По запросу «${searchTerm}» ничего не найдено.`;
+      return;
+    }
+
+    status.textContent = `Найдено записей: ${snapshot.size}`;
+    snapshot.forEach((docSnap) => renderPost(feed, docSnap));
+
+  } catch (e) {
+    status.textContent = "Ошибка при поиске.";
+    console.error("Ошибка searchByName:", e);
+  }
+}
+
+// ── existing like handler ──────────────────────────────
+window.processLike = async (id) => {
+  try {
+    await updateDoc(doc(db, "requests", id), { likes: increment(1) });
   } catch (e) {
     console.error("Ошибка при обновлении лайков:", e);
   }
 };
 
+// ── helper: render one post card ──────────────────────
+function renderPost(container, docSnap) {
+  const data = docSnap.data();
+  const id   = docSnap.id;
+  const div  = document.createElement("div");
+  div.className = "post";
+  div.innerHTML = `
+    <span class="time">
+      ${data.timestamp?.toDate().toLocaleString() || '…'}
+    </span>
+    <b>${data.name  || ''}</b><br>
+    <p style="margin:5px 0;">${data.email || ''}</p>
+    <button class="like-btn"   onclick="processLike('${id}')">👍 ${data.likes || 0}</button>
+    <button class="delete-btn" onclick="deletePost('${id}')">🗑 Удалить</button>
+  `;
+  container.appendChild(div);
+}
+
+// ── live real-time feed ────────────────────────────────
+function startLiveFeed() {
+  const feed = document.getElementById("feed");
+  const q = query(collection(db, "requests"), orderBy("timestamp", "desc"));
+
+  unsubscribe = onSnapshot(q, (snapshot) => {
+    feed.innerHTML = "";
+    snapshot.forEach((docSnap) => renderPost(feed, docSnap));
+  });
+}
+
+// ── publish button ─────────────────────────────────────
 document.getElementById("mainBtn").onclick = async () => {
   const btn = document.getElementById("mainBtn");
   btn.disabled = true;
-
   try {
     await addDoc(collection(db, "requests"), {
-      name:     document.getElementById("name").value,
-      email:    document.getElementById("email").value,
-      likes:    0,
+      name:      document.getElementById("name").value,
+      email:     document.getElementById("email").value,
+      likes:     0,
       timestamp: serverTimestamp()
     });
-
     document.getElementById("email").value = "";
   } catch (e) {
     alert("Ошибка безопасности: данные отклонены сервером.");
     console.error(e);
   }
-
   btn.disabled = false;
 };
 
-const q = query(
-  collection(db, "requests"),
-  orderBy("timestamp", "desc")
-);
+// ── search button & clear ──────────────────────────────
+document.getElementById("searchBtn").onclick = () => {
+  searchByName(document.getElementById("searchInput").value.trim());
+};
 
-onSnapshot(q, (snapshot) => {
-  const feed = document.getElementById("feed");
-  feed.innerHTML = "";
-
-  snapshot.forEach((doc) => {
-    const data = doc.data();
-    const id   = doc.id;
-
-    feed.innerHTML += `
-      <div class="post">
-        <span class="time">
-          ${data.timestamp?.toDate().toLocaleString() || '…'}
-        </span>
-
-        <b>${data.name || ''}</b><br>
-        <p style="margin: 5px 0;">${data.email || ''}</p>
-
-        <button class="like-btn" onclick="processLike('${id}')">
-          👍 ${data.likes || 0}
-        </button>
-      </div>
-    `;
-  });
+document.getElementById("searchInput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") searchByName(e.target.value.trim());
 });
+
+document.getElementById("clearBtn").onclick = () => {
+  document.getElementById("searchInput").value = "";
+  document.getElementById("searchStatus").textContent = "";
+  startLiveFeed();
+};
+
+// ── boot ───────────────────────────────────────────────
+startLiveFeed();
 </script>
 
 </body>
